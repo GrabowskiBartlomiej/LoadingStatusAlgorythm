@@ -1,23 +1,17 @@
 package pl.kambu.loading_screen.service;
 
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.io.FileUtils;
-import org.apache.commons.io.IOUtils;
-import org.apache.commons.io.LineIterator;
-import org.springframework.stereotype.Service;
-import pl.kambu.loading_screen.model.ServiceStatusEnum;
+import pl.kambu.loading_screen.commons.ServiceStatus;
+import pl.kambu.loading_screen.commons.Status;
+import pl.kambu.loading_screen.config.OperationSemaphore;
 import pl.kambu.loading_screen.model.Update;
-import pl.kambu.loading_screen.model.UpdateStatus;
-import pl.kambu.loading_screen.model.UpdateStatusEnum;
+import pl.kambu.loading_screen.dto.UpdateStatusDTO;
+import pl.kambu.loading_screen.commons.UpdateStatus;
 
-import java.io.*;
 import java.text.SimpleDateFormat;
 import java.util.*;
 
 
-@RequiredArgsConstructor
-@Service
 @Slf4j
 public class LoadingCoreServiceImpl implements LoadingCoreService {
 
@@ -25,60 +19,86 @@ public class LoadingCoreServiceImpl implements LoadingCoreService {
     private boolean isUpdating = false;
     private Long updateStartTime;
     private Long updateFinishTime;
-    public ServiceStatusEnum currentServiceStatus = ServiceStatusEnum.ONLINE;
-    public UpdateStatus updateStatus = new UpdateStatus();
+    public ServiceStatus currentServiceStatus = ServiceStatus.ONLINE;
+    public UpdateStatusDTO updateStatus = new UpdateStatusDTO();
+    public FileManagerImpl fileManager = new FileManagerImpl();
+    private final OperationSemaphore semaphore = new OperationSemaphore();
+
+    public LoadingCoreServiceImpl() {
+    }
 
     @Override
     public void start() {
         isUpdating = true;
-        currentServiceStatus = ServiceStatusEnum.UPDATING;
+        currentServiceStatus = ServiceStatus.UPDATING;
+        updateStatus.setServiceStatus(currentServiceStatus);
         log.info("Update has started...");
-        List<Update> updates = getAllPreviousUpdatesFromFile();
-
-        try {
-            List<UpdateStatusEnum> statuses = Arrays.asList(UpdateStatusEnum.values());
-            int statusCounter = 0;
-            UpdateStatusEnum status = statuses.get(statusCounter);
-            updateStartTime = System.currentTimeMillis();
-            long progressDelay = getAverageUpdateTime(updates) * 10;
-            for (int i = 0; i <= 999; i++) {
+        List<Update> updates = fileManager.getAllPreviousUpdatesFromFile();
+        List<UpdateStatus> statuses = Arrays.asList(UpdateStatus.values());
+        int statusCounter = 0;
+        long progressDelay = getAverageUpdateTime(updates) * 10;
+        Long progressCounter = 0L;
+        nextId = updates.get(0).getId() + 1;
+        UpdateStatus currentStatus = statuses.get(statusCounter);
+        UpdateStatus nextStatus = statuses.get(statusCounter + 1);
+        updateStartTime = System.currentTimeMillis();
+        LinkedHashMap<UpdateStatus, Status> stepStatus = new LinkedHashMap();
+        for (UpdateStatus status : statuses) {
+            stepStatus.put(status, Status.TODO);
+        }
+        stepStatus.put(UpdateStatus.READY, Status.ONGOING);
+        updateStatus.setStepsStatus(stepStatus);
+        while (isUpdating) {
+            try {
+                Thread.sleep(progressDelay);
                 if (!(isUpdating)) {
                     break;
                 }
-                Thread.sleep(progressDelay);
-                if (i >= status.getPercentage()) {
-                    statusCounter++;
-                    status = statuses.get(statusCounter);
-                }
 
-                if (i > 100) {
+                semaphore.acquire();
+                if (progressCounter > 100) {
+                    if (progressCounter >= nextStatus.getPercentage() && nextStatus.getPercentage() != -1) {
+                        stepStatus.put(currentStatus, Status.DONE);
+                        stepStatus.put(nextStatus, Status.ONGOING);
+                        updateStatus.setStepsStatus(stepStatus);
+                        statusCounter++;
+                        currentStatus = nextStatus;
+                        nextStatus = statuses.get(statusCounter + 1);
+                    }
                     updateStatus.setPercentage(100L);
-                    updateStatus.setDescription(UpdateStatusEnum.LASTS_LONGER_THAN_EXPECTED.getDescription());
-                    System.out.printf("Current Status : %s , Progress : %s%n", status.getDescription(), 100);
+                    updateStatus.setDescription(UpdateStatus.LASTS_LONGER_THAN_EXPECTED.getDescription());
+//                    log.info(String.format("Current Status : %s , Progress : %s%n", currentStatus.getDescription(), 100));
                 } else {
-                    updateStatus.setDescription(status.getDescription());
-                    updateStatus.setPercentage((long) i);
-                    System.out.printf("Current Status : %s , Progress : %s%n", status.getDescription(), i);
+                    updateStatus.setDescription(currentStatus.getDescription());
+                    updateStatus.setPercentage(progressCounter);
+//                    log.info(String.format("Current Status : %s , Progress : %s%n", currentStatus.getDescription(), progressCounter));
                 }
-
-
+                progressCounter++;
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            } finally {
+                semaphore.end();
             }
-        } catch (InterruptedException e) {
-            Thread.interrupted();
         }
-
     }
 
     @Override
     public void end() {
+
         updateFinishTime = System.currentTimeMillis();
-        updateStatus.setDescription(UpdateStatusEnum.FINISHED.getDescription());
+        updateStatus.setDescription(UpdateStatus.FINISHED.getDescription());
         updateStatus.setPercentage(100L);
-        System.out.printf("Current Status : %s , Progress : %s%n", UpdateStatusEnum.FINISHED.getDescription(), 100);
-        log.info("Update ended, saving data about it to the file...");
-        currentServiceStatus = ServiceStatusEnum.ONLINE;
+        currentServiceStatus = ServiceStatus.ONLINE;
+        updateStatus.setServiceStatus(currentServiceStatus);
+        LinkedHashMap<UpdateStatus, Status> stepStatus = updateStatus.getStepsStatus();
+        Set<UpdateStatus> keys = stepStatus.keySet();
+        for (UpdateStatus entry : keys) {
+            stepStatus.put(entry, Status.DONE);
+        }
         isUpdating = false;
-        savingNewUpdateToFileOnTheTopOfIt(createNewUpdateObject());
+        log.info(String.format("Current Status : %s , Progress : %s%n", UpdateStatus.FINISHED.getDescription(), 100));
+        log.info("Update ended, saving data about it to the file...");
+        fileManager.savingNewUpdateToFileOnTheTopOfIt(createNewUpdateObject());
     }
 
     @Override
@@ -95,79 +115,7 @@ public class LoadingCoreServiceImpl implements LoadingCoreService {
         return avg / previousUpdates.size();
     }
 
-
-    public List<Update> getAllPreviousUpdatesFromFile() {
-        log.info("Loading all previous updates from file...");
-        String line;
-        List<Update> updates = new ArrayList<>();
-        try {
-            File previousUpdatesFile = new File("src/main/resources/previous_updates_data.txt");
-            if (previousUpdatesFile.createNewFile()) {
-                // Na sztywno pierwsze dane od Kulczaka
-            }
-            BufferedReader reader = new BufferedReader(new FileReader(previousUpdatesFile));
-            log.info("Transforming file data into previous Update objects...");
-            while ((line = reader.readLine()) != null) {
-                updates.add(transformFileLineIntoUpdateInstance(line));
-            }
-
-            nextId = updates.get(0).getId() + 1;
-
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        return updates;
-    }
-
-
-    public Update transformFileLineIntoUpdateInstance(String line) {
-        List<String> data = Arrays.asList(line.split(";"));
-        Update update = new Update();
-        Long id = Long.parseLong(data.get(0).substring(data.get(0).lastIndexOf("=") + 1));
-        String updateDate = (data.get(1).substring((data.get(1).lastIndexOf("=") + 1)));
-        Long durationInSeconds = Long.parseLong(data.get(2).substring(data.get(2).lastIndexOf("=") + 1));
-
-        update.setId(id);
-        update.setUpdateDate(updateDate);
-        update.setDuration(durationInSeconds);
-        return update;
-    }
-
-
-    public void savingNewUpdateToFileOnTheTopOfIt(Update update) {
-        log.info("Saving the just executed update to the file...");
-        try {
-            File previousUpdatesFile = new File("src/main/resources/", "previous_updates_data.txt");
-            previousUpdatesFile.createNewFile();
-
-            File tempFile = File.createTempFile("src/main/resources/", ".tmp");
-
-            FileWriter fw = new FileWriter(tempFile, true);
-            BufferedWriter writer = new BufferedWriter(fw);
-            LineIterator li = FileUtils.lineIterator(previousUpdatesFile);
-
-            try {
-                writer.write(String.format("id=%s;date=%s;duration=%s", update.getId(), update.getUpdateDate(), update.getDuration()));
-                writer.write("\n");
-                while (li.hasNext()) {
-                    writer.write(li.nextLine());
-                    writer.write("\n");
-                }
-            } finally {
-                IOUtils.closeQuietly(writer);
-                LineIterator.closeQuietly(li);
-            }
-            FileUtils.deleteQuietly(previousUpdatesFile);
-            FileUtils.moveFile(tempFile, previousUpdatesFile);
-
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        log.info("Update has been saved successfully!");
-    }
-
-
-    private Update createNewUpdateObject() {
+    public Update createNewUpdateObject() {
         log.info("Creating an Update object of the update just executed...");
         Update update = new Update();
         update.setId(nextId);

@@ -3,15 +3,15 @@ package pl.kambu.loading_screen.controller;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
-import pl.kambu.loading_screen.model.ServiceStatusEnum;
-import pl.kambu.loading_screen.model.UpdateStatus;
+import pl.kambu.loading_screen.commons.ServiceStatus;
+import pl.kambu.loading_screen.dto.UpdateStatusDTO;
 import pl.kambu.loading_screen.service.LoadingCoreServiceImpl;
 
 @RestController
 @RequiredArgsConstructor
 public class Controller {
 
-    private final LoadingCoreServiceImpl service;
+    private final LoadingCoreServiceImpl service = new LoadingCoreServiceImpl();
 
     @GetMapping("/hello")
     public String hello() throws InterruptedException {
@@ -35,12 +35,8 @@ public class Controller {
         return "Hello";
     }
     @GetMapping("/update-status")
-    public UpdateStatus getStatus() {
+    public UpdateStatusDTO getStatus() {
         return service.updateStatus;
     }
 
-    @GetMapping("service-status")
-    public ServiceStatusEnum getServiceStatus() {
-        return service.currentServiceStatus;
-    }
 }
